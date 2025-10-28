@@ -8,12 +8,11 @@ sqs = boto3.client('sqs')
 url='https://j9y2xa0vx0.execute-api.us-east-1.amazonaws.com/api/scatter/jac7az'
 uvaid='jac7az'
 submit_url='https://sqs.us-east-1.amazonaws.com/440848399208/dp2-submit'
-
+logger=get_run_logger()
 
 #Task1: Populate the message queue with all 21 messages
 @task
 def populate_message(url):
-    logger=get_run_logger()
     try:
         payload=requests.post(url).json()
         if payload.get('sqs_url'):
@@ -29,7 +28,7 @@ def populate_message(url):
 #Task2: Get the number of messages that need to be processed with get_queue_attributes() and receive those messages with receive_message(). Finally, delete the message with delete_message()
 @task
 def get_queue_attributes(url):  #Finds the number of messages available, hidden and delayed.
-    logger=get_run_logger()   
+      
     try:                                                                                     
         response = sqs.get_queue_attributes(QueueUrl=url,AttributeNames=['ApproximateNumberOfMessages','ApproximateNumberOfMessagesNotVisible','ApproximateNumberOfMessagesDelayed'])                                      
         attributes=response['Attributes']
@@ -41,14 +40,15 @@ def get_queue_attributes(url):  #Finds the number of messages available, hidden 
             print(f"Response: {response}")    
             return num_messages, num_messages+num_invis+num_delay
         else:
-            logger.error("Error in getting queue messages")     
+            logger.error("Error in getting queue messages")    
+            return 
     except Exception as e:                                                                                 
-        print(f"Error getting queue attributes: {e}")                                                      
+        logger.error(f"Error getting queue attributes: {e}")                                                      
         raise e  
     
 @task
 def receive_message(url):      #Receives individual messages and extracts the order number and word from them. Also extracts the receipt handle for each message to delete later.
-    logger=get_run_logger()
+    
     try:
         response = sqs.receive_message(
             QueueUrl=url,
@@ -73,12 +73,12 @@ def receive_message(url):      #Receives individual messages and extracts the or
         return {'order_no':order_no,'word':word,'receipt_handle':receipt_handle}
 
     except Exception as e:
-        print(f"Error getting message: {e}")
+        logger.error(f"Error getting message: {e}")
         raise e
 
 @task
 def delete_message(url, receipt_handle):    #deleting the message to move on to the next one.
-    logger=get_run_logger()
+
     try:
         deleted_response = sqs.delete_message(
             QueueUrl=url,
@@ -87,21 +87,21 @@ def delete_message(url, receipt_handle):    #deleting the message to move on to 
         print(f"Response deleted: {deleted_response}")
         logger.info("Message deleted")
     except Exception as e:
-        print(f"Error deleting message: {e}")
+        logger.error(f"Error deleting message: {e}")
         raise e
 
 #Task 3: Assembling the message together by putting it through a dataframe, sorting it and concatenating the words into one message with assemble_message(). Then, the final solution is sent back to the given aws URL with send_url().
 
 @task
 def assemble_message(messages): #converting the list of dictionaries containing order number and words into a dataframe to sort and form a message.
-    logger=get_run_logger()
+   
     try:
         df=pd.DataFrame(messages)
         df['order_no']=df['order_no'].astype(int)
         sort_df=df.sort_values(by='order_no').reset_index(drop=True)
         return " ".join(sort_df['word'])
     except Exception as e:
-        print('Cannot form dataframe')
+        logger.error("Cannot form dataframe.")
         raise e
     
 @task
@@ -126,6 +126,7 @@ def send_solution(url,uvaid, phrase, platform): #sends the solution to the given
                 }
             }
         )
+        logger.info("Message sent.")
         print(f"Response: {response}")
     except Exception as e:
         print("Couldn't submit response")
@@ -133,7 +134,7 @@ def send_solution(url,uvaid, phrase, platform): #sends the solution to the given
 
 @flow
 def sqs_pipeline(): #The flow method to put all the tasks together and run automatically.
-    logger=get_run_logger()
+  
     populate=populate_message(url)
     message_list=[]
     messages_checked=0
@@ -156,7 +157,6 @@ def sqs_pipeline(): #The flow method to put all the tasks together and run autom
                 delete_message(populate, received['receipt_handle'])
                 messages_checked+=1
                 logger.info(f"{messages_checked} messages checked.")
-                print(message_list)
     phrase=assemble_message(message_list)
     logger.info(f"Message: {phrase}")
     submission=send_solution.submit(submit_url,uvaid,phrase,'prefect')
