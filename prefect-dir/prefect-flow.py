@@ -129,7 +129,7 @@ def send_solution(url,uvaid, phrase, platform): #sends the solution to the given
         logger.info("Message sent.")
         print(f"Response: {response}")
     except Exception as e:
-        print("Couldn't submit response")
+        logger.error("Couldn't submit response")
         raise e
 
 @flow

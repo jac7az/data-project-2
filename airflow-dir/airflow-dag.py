@@ -1,6 +1,7 @@
-from airflow.decorators import dag, task
+from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.models.baseoperator import chain
+from airflow.models import Variable
 from datetime import datetime
 import requests
 import boto3
@@ -9,13 +10,19 @@ import pandas as pd
 import logging
 
 logger = logging.getLogger("airflow.task")
-sqs = boto3.client('sqs')  
+sqs = boto3.client('sqs',region_name='us-east-1',aws_access_key_id=Variable.get('AWS_ACCESS_KEY_ID'),
+                   aws_secret_access_key=Variable.get('AWS_SECRET_ACCESS_KEY'))  
 url='https://j9y2xa0vx0.execute-api.us-east-1.amazonaws.com/api/scatter/jac7az'
 uvaid='jac7az'
 submit_url='https://sqs.us-east-1.amazonaws.com/440848399208/dp2-submit'
+default_args={'owner':'airflow',
+              'depends_on_past':False,
+              'email_on_failure':False,
+              'email_on_retry':False,
+              'retries':1}
+
 
 #Task1: Populate the message queue with all 21 messages
-@task
 def populate_message(url):
     try:
         payload=requests.post(url).json()
@@ -79,7 +86,6 @@ def receive_message(url):      #Receives individual messages and extracts the or
         raise e
 
 def delete_message(url, receipt_handle):    #deleting the message to move on to the next one.
-
     try:
         deleted_response = sqs.delete_message(
             QueueUrl=url,
@@ -92,10 +98,27 @@ def delete_message(url, receipt_handle):    #deleting the message to move on to 
         raise e
 
 #Task 3: Assembling the message together by putting it through a dataframe, sorting it and concatenating the words into one message with assemble_message(). Then, the final solution is sent back to the given aws URL with send_url().
-def assemble_message(messages): #converting the list of dictionaries containing order number and words into a dataframe to sort and form a message.
-   
+def assemble_message(url): #converting the list of dictionaries containing order number and words into a dataframe to sort and form a message.
+    message_list=[]
+    messages_checked=0
     try:
-        df=pd.DataFrame(messages)
+        while messages_checked!=21:
+            messages_available,total_messages=get_queue_attributes(url) 
+            if messages_available==0:
+                logger.info("No messages right now. Pausing for 15sec.")
+                time.sleep(15)
+            else:
+                received=receive_message(populate)
+                if received=='':
+                    logger.info("Empty message.")
+                    continue
+                else:
+                    message_list.append({'order_no':received['order_no'],'word':received['word']})
+                logger.info(f"Receipt handle: {received['receipt_handle']}")
+                delete_message(populate, received['receipt_handle'])
+                messages_checked+=1
+                logger.info(f"{messages_checked} messages checked.")
+        df=pd.DataFrame(message_list)
         df['order_no']=df['order_no'].astype(int)
         sort_df=df.sort_values(by='order_no').reset_index(drop=True)
         return " ".join(sort_df['word'])
@@ -128,56 +151,32 @@ def send_solution(url,uvaid, phrase, platform): #sends the solution to the given
     except Exception as e:
         logger.error("Couldn't submit response")
         raise e
-    
-@dag(
-    dag_id='sqs_pipeline',
-    start_date=datetime(2025,10,27)
-)
-def sqs_pipeline():
 
-    #runs the populate_message()
+with DAG('sqs_pipeline',
+        default_args=default_args,
+        start_date=datetime(2025,10,27),
+        schedule=None,
+        catchup=False
+) as dag:
     populate=PythonOperator(
         task_id='populate_message',
         python_callable=populate_message,
         op_kwargs={'url':url},
     )
     logger.info(f"Message populated: {populate}")
-
-    @task
-    def all_messages(url):
-        message_list=[]
-        messages_checked=0
-        while messages_checked!=21:
-            messages_available,total_messages=get_queue_attributes(url) 
-            if messages_available==0:
-                logger.info("No messages right now. Pausing for 15sec.")
-                time.sleep(15)
-            else:
-                received=receive_message(populate)
-                if received=='':
-                    logger.info("Empty message.")
-                    continue
-                else:
-                    message_list.append({'order_no':received['order_no'],'word':received['word']})
-                logger.info(f"Receipt handle: {received['receipt_handle']}")
-                delete_message(populate, received['receipt_handle'])
-                messages_checked+=1
-                logger.info(f"{messages_checked} messages checked.")
-        return message_list
-        
-    message_list=all_messages(populate.output)
-    phrase=PythonOperator(task_id='assemble_messages',
-                          python_callable=assemble_message,
-                          op_kwargs={'messages':message_list.output},)
-    submission=PythonOperator(task_id='send_messages',
-                              python_callable=send_solution,
-                              op_kwargs={'url':submit_url,
-                                         'uvaid':uvaid,
-                                         'platform':'airflow',
-                                         'phrase':phrase.output,}
-                              )
-    chain(populate,message_list,phrase,submission)
+    phrase=PythonOperator(
+        task_id='process_and_assemble_messages',
+        python_callable=assemble_message,
+        op_kwargs={'url':populate.output},
+    )
+    logger.info(f"Phrase extracted: {phrase}")
+    submission=PythonOperator(
+        task_id='send_solution',
+        python_callable=send_solution,
+        op_kwargs={'url':submit_url,
+                   'uvaid':uvaid,
+                   'phrase':phrase,
+                   'platform':'airflow'},
+    )
     logger.info("Submission sent.")
-if __name__ == "__main__":
-    phrase=sqs_pipeline()
-    print(phrase)
+chain(populate,phrase,submission)    
