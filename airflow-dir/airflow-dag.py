@@ -8,7 +8,6 @@ import requests
 import boto3
 import time
 import pandas as pd
-import logging
 from airflow.models import XCom
 
 url='https://j9y2xa0vx0.execute-api.us-east-1.amazonaws.com/api/scatter/jac7az'
@@ -26,17 +25,15 @@ def sqs_client():
 
 #Task1: Populate the message queue with all 21 messages
 def populate_message(url):
-    logger = logging.getLogger("airflow.task")
     try:
         payload=requests.post(url).json()
         if payload.get('sqs_url'):
-            logger.info(f"Got sqs url: {payload.get('sqs_url')}")
+            print(f"Got sqs url: {payload.get('sqs_url')}")
             return payload.get('sqs_url')
         else:
             raise ValueError("Link not found.")
     except Exception as e:
         print(f"Request failure in POST: {e}")
-        logger.error("Request failure in POST")
         raise e
 
 #Task2: Get the number of messages that need to be processed with get_queue_attributes() and receive those messages with receive_message(). Finally, delete the message with delete_message()
@@ -44,7 +41,6 @@ def populate_message(url):
 def assemble_message(url):
     message_list=[]
     messages_checked=0
-    logger = logging.getLogger("airflow.task")
     sqs=sqs_client()
     try:    #get_queue_attributes() from prefect
         while messages_checked!=21:
@@ -54,10 +50,10 @@ def assemble_message(url):
                 num_messages=int(attributes.get('ApproximateNumberOfMessages',0))
                 num_invis=int(attributes.get('ApproximateNumberOfMessagesNotVisible',0))
                 num_delay=int(attributes.get('ApproximateNumberOfMessagesDelayed',0))
-                logger.info(f"{num_messages} available. {num_invis+num_delay} left.")
+                print(f"{num_messages} available. {num_invis+num_delay} left.")
                 print(f"Response: {response}")          
             except Exception as e:                                                                                 
-                logger.error(f"Error getting queue attributes: {e}")                                                      
+                print(f"Error getting queue attributes: {e}")                                                      
                 raise e
             
             try:    #receive_message() from prefect
@@ -70,44 +66,43 @@ def assemble_message(url):
             )
                 messages=response.get('Messages','')
                 if not messages:
-                    logger.info("Messages empty. Pausing for 15sec")
+                    print("Messages empty. Pausing for 15sec")
                     time.sleep(15)
                 else:
-                    logger.info("Message received. Extracting receipt handle, word and order number.")
+                    print("Message received. Extracting receipt handle, word and order number.")
                     word=response['Messages'][0]['MessageAttributes']['word']['StringValue']
-                    logger.info(f"word received: {word}")
+                    print(f"word received: {word}")
 
                     order_no=response['Messages'][0]['MessageAttributes']['order_no']['StringValue']
-                    logger.info(f"order number received: {order_no}")
+                    print(f"order number received: {order_no}")
                     
                     #receipt for deleting later
                     receipt_handle = response['Messages'][0]['ReceiptHandle']
-                    logger.info(f"response handle received: {receipt_handle}")
+                    print(f"response handle received: {receipt_handle}")
                     message_list.append({'order_no':order_no,'word':word})
                     messages_checked+=1
-                    logger.info(f"Current messages checked: {messages_checked}")
+                    print(f"Current messages checked: {messages_checked}")
 
                     #delete_message() from prefect
                     try:
                         sqs.delete_message(QueueUrl=url,ReceiptHandle=receipt_handle)
-                        logger.info("Message deleted")
+                        print("Message deleted")
                     except Exception as e:
-                        logger.error("Could not delete message")
+                        print("Could not delete message")
             except Exception as e:
-                logger.error(f"Error getting message: {e}")
+                print(f"Error getting message: {e}")
         df=pd.DataFrame(message_list)
         df['order_no']=df['order_no'].astype(int)
         sort_df=df.sort_values(by='order_no').reset_index(drop=True)
         phrase=" ".join(sort_df['word'])
-        logger.info(f"Final phrase assembled: {phrase}")
+        print(f"Final phrase assembled: {phrase}")
         return phrase
     except Exception as e:
-        logger.error(f'Assembly error: {e}')
+        print(f'Assembly error: {e}')
         raise e
     
 def send_solution(url,uvaid, phrase, platform): #sends the solution to the given URL.
     sqs=sqs_client()
-    logger = logging.getLogger("airflow.task")
     try:
         message=f"Solution from {uvaid} using {platform}"
         response = sqs.send_message(
@@ -128,9 +123,9 @@ def send_solution(url,uvaid, phrase, platform): #sends the solution to the given
                 }
             }
         )
-        logger.info(f"Response: {response}")
+        print(f"Response: {response}")
     except Exception as e:
-        logger.error("Couldn't submit response")
+        print("Couldn't submit response")
         raise e
         
 #Assembling the DAG
